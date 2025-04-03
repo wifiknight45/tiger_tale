@@ -1,0 +1,153 @@
+########
+
+
+import socket
+import threading
+from queue import Queue
+import time
+import csv
+import random
+import ssl
+from datetime import datetime
+
+# Common ports and their services
+COMMON_SERVICES = {
+    20: "FTP-DATA", 21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP",
+    53: "DNS", 80: "HTTP", 110: "POP3", 143: "IMAP", 443: "HTTPS",
+    3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL", 8080: "HTTP-ALT"
+}
+
+def get_service(port, sock=None):
+    """Detect service running on the port"""
+    try:
+        if port in COMMON_SERVICES:
+            service = COMMON_SERVICES[port]
+            # Try to get banner for common services
+            if port in [80, 443, 8080]:
+                sock.settimeout(2)
+                if port == 443:
+                    context = ssl.create_default_context()
+                    sock = context.wrap_socket(sock, server_hostname=host)
+                sock.send(b"HEAD / HTTP/1.0\r\n\r\n")
+                banner = sock.recv(1024).decode('utf-8', errors='ignore')
+                return f"{service} ({banner.splitlines()[0]})"
+            elif port == 22:
+                sock.settimeout(2)
+                banner = sock.recv(1024).decode('utf-8', errors='ignore')
+                return f"{service} ({banner.strip()})"
+            return service
+        return "Unknown"
+    except:
+        return COMMON_SERVICES.get(port, "Unknown")
+
+def stealth_port_scan(host, port):
+    """Stealth scan with randomized timing and error handling"""
+    try:
+        # Random delay to avoid pattern detection (0.1-1 second)
+        time.sleep(random.uniform(0.1, 1))
+        
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Randomize source port
+        sock.bind(('', random.randint(49152, 65535)))
+        # Variable timeout to avoid pattern detection
+        sock.settimeout(random.uniform(0.5, 1.5))
+        
+        result = sock.connect_ex((host, port))
+        if result == 0:
+            service = get_service(port, sock)
+            return (True, service)
+        return (False, None)
+    except socket.gaierror:
+        return (False, "Hostname resolution failed")
+    except socket.error:
+        return (False, None)
+    finally:
+        sock.close()
+
+def scan_thread(host, port_queue, results):
+    """Thread worker with stealth features"""
+    while True:
+        try:
+            port = port_queue.get_nowait()
+            is_open, service = stealth_port_scan(host, port)
+            if is_open:
+                results.append((port, service))
+            port_queue.task_done()
+        except:
+            break
+
+def scan_ports(host, start_port, end_port, num_threads=50):
+    """Main scanning function with CSV output"""
+    print(f"Starting stealth scan on {host} ({start_port}-{end_port})...")
+    start_time = time.time()
+    
+    port_queue = Queue()
+    results = []
+    
+    # Fill queue with ports in random order to avoid sequential patterns
+    ports = list(range(start_port, end_port + 1))
+    random.shuffle(ports)
+    for port in ports:
+        port_queue.put(port)
+    
+    # Use fewer threads for stealth
+    threads = []
+    for _ in range(min(num_threads, end_port - start_port + 1)):
+        thread = threading.Thread(
+            target=scan_thread,
+            args=(host, port_queue, results),
+            daemon=True  # Allow program to exit even if threads are running
+        )
+        thread.start()
+        threads.append(thread)
+    
+    # Wait for queue to be processed
+    port_queue.join()
+    
+    # Clean up threads
+    for thread in threads:
+        thread.join(timeout=1.0)
+    
+    end_time = time.time()
+    duration = end_time - start_time
+    
+    # Sort results
+    results.sort(key=lambda x: x[0])
+    
+    # Write to CSV
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"tiger_tale_{timestamp}.csv"
+    with open(filename, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['Port', 'Status', 'Service', 'Timestamp'])
+        for port, service in results:
+            writer.writerow([port, 'Open', service, datetime.now().isoformat()])
+    
+    # Print summary
+    print(f"\nScan completed in {duration:.2f} seconds")
+    print(f"Results saved to {filename}")
+    if results:
+        print("Open ports found:")
+        for port, service in results:
+            print(f"Port {port}: {service}")
+    else:
+        print("No open ports found")
+    
+    return results
+
+if __name__ == "__main__":
+    # Configuration
+    target_host = "example.com"
+    start_port = 1
+    end_port = 100
+    
+    try:
+        target_ip = socket.gethostbyname(target_host)
+        print(f"Target IP: {target_ip}")
+        scan_ports(target_ip, start_port, end_port)
+    except socket.gaierror:
+        print("Error: Could not resolve hostname")
+    except KeyboardInterrupt:
+        print("\nScan interrupted by user")
+
+#######
